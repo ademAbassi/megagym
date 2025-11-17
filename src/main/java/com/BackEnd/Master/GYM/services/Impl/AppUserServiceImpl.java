@@ -11,11 +11,12 @@ import  com.BackEnd.Master.GYM.repository.AppUserRepo;
 import  com.BackEnd.Master.GYM.services.AppUserService;
 
 import lombok.RequiredArgsConstructor;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 @Service
 @RequiredArgsConstructor
 public class AppUserServiceImpl implements AppUserService{
-    
+	private static final Logger log = LoggerFactory.getLogger(AppUserServiceImpl.class);
     private final AppUserRepo appUserRepo;
 
     @Override
@@ -57,10 +58,13 @@ public class AppUserServiceImpl implements AppUserService{
 
     @Override
     public AppUsers insert(AppUsers entity) {
+    	log.debug("About to save AppUsers: {}", entity);
         if (entity.getUserName() == null || entity.getUserName().isEmpty()) {
             throw new InvalidEntityException("Username cannot be empty.");
         }
-        return appUserRepo.save(entity);
+        AppUsers saved = appUserRepo.save(entity);
+        log.debug("After save, AppUsers: {}", saved);
+        return saved;
     }
 
     @Override

@@ -1,7 +1,10 @@
 package com.BackEnd.Master.GYM.controller;
 
 import java.io.File;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
 import java.io.IOException;
+import java.net.MalformedURLException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -10,6 +13,9 @@ import java.util.*;
 
 import java.nio.file.Path;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
@@ -37,7 +43,9 @@ import lombok.RequiredArgsConstructor;
 @RequestMapping("/customer")
 @CrossOrigin("*")
 public class customerController {
-
+	private static final Logger log = LoggerFactory.getLogger(AppUserController.class);
+	@Value("${app.upload.dir}")
+    private String uploadDir;
     private final customerService custService;
     private final customerMapper custMapper;
     private final AppUserService userRepo;
@@ -88,21 +96,26 @@ public class customerController {
         return ResponseEntity.ok(customerDto);
     }
 
-    @GetMapping("/images/{imageName}")
+    @GetMapping("/images/{imageName:.+}")
     public ResponseEntity<?> getImage(@PathVariable String imageName) {
-        String imagePath = "C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/customer/" + imageName;
+    	try {
+            Path file = Paths.get(uploadDir).resolve(imageName).normalize();
+            Resource resource = new UrlResource(file.toUri());
+            if (!resource.exists() || !resource.isReadable()) {
+                return ResponseEntity.notFound().build();
+            }
+            String contentType = Files.probeContentType(file);
+            if (contentType == null) contentType = "application/octet-stream";
 
-        File imgFile = new File(imagePath);
-
-        if (!imgFile.exists()) {
-            return ResponseEntity.notFound().build();
-        }
-
-        try {
             return ResponseEntity.ok()
-                    .contentType(MediaType.IMAGE_JPEG)
-                    .body(new FileSystemResource(imgFile));
-        } catch (Exception e) {
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .body(resource);
+
+        } catch (MalformedURLException ex) {
+            log.error("Invalid file URL for image {}: {}", imageName, ex.getMessage());
+            return ResponseEntity.badRequest().build();
+        } catch (IOException ex) {
+            log.error("Could not determine file type for image {}: {}", imageName, ex.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
@@ -135,19 +148,17 @@ public ResponseEntity<customerDto> insert(
 
     if (profileImage.isEmpty()) throw new RuntimeException("Profile image is required");
 
+    if (profileImage.isEmpty())
+        throw new RuntimeException("Profile image is required");
+
     String imageName = StringUtils.cleanPath(profileImage.getOriginalFilename());
-    Path uploadPath = Paths.get("C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/customer/");
-    Files.createDirectories(uploadPath);
-
-    Path imagePath = uploadPath.resolve(imageName);
-    Files.copy(profileImage.getInputStream(), imagePath, StandardCopyOption.REPLACE_EXISTING);
-
+    Path target = Paths.get(uploadDir).resolve(imageName).normalize();
+    Files.createDirectories(target.getParent());
+    Files.copy(profileImage.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
     customer.setProfileImage(imageName);
 
     customer saved = custService.insert(customer);
-    customerDto dto = custMapper.map(saved);
-
-    return ResponseEntity.ok(dto);
+    return ResponseEntity.ok(custMapper.map(saved));
 }
 
 @PreAuthorize("hasAnyAuthority('ROLE_Admin', 'ROLE_Coach')")
@@ -170,7 +181,7 @@ public ResponseEntity<customerDto> update(
     AppUsers user = userRepo.findById(userId);
     if (user == null) throw new ResourceNotFoundException("User not found with ID: " + userId);
 
-    String oldImageName = current.getProfileImage();
+    String oldImage = current.getProfileImage();
 
     current.setUserName(userName);
     current.setEmail(email);
@@ -182,52 +193,41 @@ public ResponseEntity<customerDto> update(
     current.setMontPay(montPay);
 
     if (profileImage != null && !profileImage.isEmpty()) {
-        String newImageName = StringUtils.cleanPath(profileImage.getOriginalFilename());
-        Path uploadPath = Paths.get("C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/customer/");
-        Files.createDirectories(uploadPath);
+        String newName = StringUtils.cleanPath(profileImage.getOriginalFilename());
+        Path target = Paths.get(uploadDir).resolve(newName).normalize();
+        Files.createDirectories(target.getParent());
+        Files.copy(profileImage.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
+        current.setProfileImage(newName);
 
-        Path newImagePath = uploadPath.resolve(newImageName);
-        Files.copy(profileImage.getInputStream(), newImagePath, StandardCopyOption.REPLACE_EXISTING);
-
-        current.setProfileImage(newImageName);
-
-        // Supprimer ancienne image si différente
-        if (oldImageName != null && !oldImageName.equals(newImageName)) {
-            Path oldImagePath = uploadPath.resolve(oldImageName);
-            Files.deleteIfExists(oldImagePath);
+        // delete old
+        if (oldImage != null && !oldImage.equals(newName)) {
+            Path oldPath = Paths.get(uploadDir).resolve(oldImage).normalize();
+            Files.deleteIfExists(oldPath);
         }
     }
 
     customer updated = custService.update(current);
-    customerDto dto = custMapper.map(updated);
-
-    return ResponseEntity.ok(dto);
+    return ResponseEntity.ok(custMapper.map(updated));
 }
 
-@PreAuthorize("hasAuthority('ROLE_Admin')")
+@PreAuthorize("hasAnyAuthority('ROLE_Admin', 'ROLE_Coach')")
 @DeleteMapping("/{id}")
-public ResponseEntity<String> deleteById(@PathVariable Long id) {
+public ResponseEntity<Map<String,String>> deleteById(@PathVariable Long id) {
+    customer cust = custService.findById(id);
+    if (cust == null) throw new ResourceNotFoundException("Customer not found: " + id);
 
-    customer customer = custService.findById(id);
-    if (customer == null) {
-        throw new ResourceNotFoundException("Customer not found with ID: " + id);
-    }
-
-    String imageName = customer.getProfileImage();
-    if (imageName != null && !imageName.isEmpty()) {
-        Path uploadPath = Paths.get("C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/customer/");
-        Path imagePath = uploadPath.resolve(imageName);
+    String imageName = cust.getProfileImage();
+    if (imageName != null && !imageName.isBlank()) {
+        Path file = Paths.get(uploadDir).resolve(imageName).normalize();
         try {
-            Files.deleteIfExists(imagePath);
-        } catch (IOException e) {
-            System.out.println("Failed to delete image: " + e.getMessage());
+            Files.deleteIfExists(file);
+        } catch (IOException ex) {
+            log.warn("Could not delete image {}: {}", file, ex.getMessage());
         }
     }
 
     custService.deleteById(id);
-
-    String jsonResponse = "{\"message\": \"Customer and associated image deleted successfully.\"}";
-    return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(jsonResponse);
+    return ResponseEntity.ok(Map.of("message", "Customer and associated image deleted successfully."));
 }
 
 }

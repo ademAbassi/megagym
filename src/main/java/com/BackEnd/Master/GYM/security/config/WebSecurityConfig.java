@@ -28,6 +28,7 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 
 import com.nimbusds.jose.jwk.source.ImmutableSecret;
 
@@ -39,6 +40,8 @@ public class WebSecurityConfig {
     @Value("${jwt.secret}")
     private String SecretKey;
 
+    @Value("${app.upload.dir}")
+    private String uploadDir;
     // **** pour tester l'app avant d'ajouter la securiter avec (oauth2,spring
     // securtiy)
     // @Bean
@@ -149,6 +152,13 @@ public class WebSecurityConfig {
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", corsConfiguration);
         return source;
+    }
+    
+    public void addResourceHandlers(ResourceHandlerRegistry registry) {
+        // Expose files under /user/images/** from the filesystem directory
+        registry
+          .addResourceHandler("/user/images/**")
+          .addResourceLocations("file:" + uploadDir + "/");
     }
 
 }

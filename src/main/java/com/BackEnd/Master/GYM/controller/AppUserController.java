@@ -1,15 +1,20 @@
 package com.BackEnd.Master.GYM.controller;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
 import java.io.File;
 import java.io.IOException;
+import java.net.MalformedURLException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
-
+import java.util.Map;
 import java.nio.file.Path;
 
-
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -26,6 +31,7 @@ import com.BackEnd.Master.GYM.entity.AppUsers;
 import com.BackEnd.Master.GYM.entity.Roles;
 import com.BackEnd.Master.GYM.Mapper.AppUserMapper;
 import com.BackEnd.Master.GYM.services.AppUserService;
+import com.BackEnd.Master.GYM.services.Impl.AppUserServiceImpl;
 import com.BackEnd.Master.GYM.repository.RolesRepo;
 
 import lombok.RequiredArgsConstructor;
@@ -36,10 +42,15 @@ import lombok.RequiredArgsConstructor;
 @CrossOrigin("*")
 public class AppUserController {
 
+	private static final Logger log = LoggerFactory.getLogger(AppUserController.class);
     private final AppUserService appUserService;
     private final AppUserMapper appUserMapper;
     private final RolesRepo rolesRepo;
     private final PasswordEncoder passwordEncoder;
+    private static final Logger logger = LoggerFactory.getLogger(AppUserController.class);
+
+    @Value("${app.upload.dir}")
+    private String uploadDir;
 
     // @PreAuthorize("hasAnyAuthority('ROLE_Admin', 'ROLE_Coach')")
     @GetMapping("/{id}")
@@ -93,23 +104,39 @@ public class AppUserController {
         return ResponseEntity.ok(userDto);
     }
 
-    @GetMapping("/images/{imageName}")
-    public ResponseEntity<?> getImage(@PathVariable String imageName) {
-        String imagePath = "C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/Profile-img/" + imageName;
-        File imgFile = new File(imagePath);
-
-        if (!imgFile.exists()) {
-            return ResponseEntity.notFound().build();
-        }
-
+    @GetMapping("/images/{imageName:.+}")
+    public ResponseEntity<Resource> getImage(@PathVariable String imageName) {
         try {
+            // 1) Build the file’s Path
+            Path file = Paths.get(uploadDir).resolve(imageName).normalize();
+
+            // 2) Resolve it as a Resource
+            Resource resource = new UrlResource(file.toUri());
+            if (!resource.exists() || !resource.isReadable()) {
+                log.warn("Image not found or not readable: {}", file);
+                return ResponseEntity.notFound().build();
+            }
+
+            // 3) Determine content type
+            String contentType = Files.probeContentType(file);
+            if (contentType == null) {
+                contentType = "application/octet-stream";
+            }
+
+            // 4) Return OK with correct headers
             return ResponseEntity.ok()
-                    .contentType(MediaType.IMAGE_JPEG) // Remplacez par le type MIME correct
-                    .body(new FileSystemResource(imgFile));
-        } catch (Exception e) {
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .body(resource);
+
+        } catch (MalformedURLException ex) {
+            log.error("Malformed URL for image: {}", imageName, ex);
+            return ResponseEntity.badRequest().build();
+        } catch (IOException ex) {
+            log.error("Could not determine file type for image: {}", imageName, ex);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
+
 
 
 @PostMapping(consumes = { "multipart/form-data" })
@@ -122,8 +149,10 @@ public ResponseEntity<AppUserDto> insert(
         @RequestParam("description") String description,
         @RequestParam("profileImage") MultipartFile profileImage) throws IOException {
 
+	
     Roles role = rolesRepo.findByRoleName(roleName)
             .orElseThrow(() -> new RuntimeException("Role not found"));
+    
 
     String hashedPassword = passwordEncoder.encode(motDePasse);
 
@@ -134,14 +163,16 @@ public ResponseEntity<AppUserDto> insert(
     user.setMotDePasse(hashedPassword);
     user.setRole(role);
     user.setDescription(description);
-
+    
+    
     if (profileImage.isEmpty()) {
         throw new RuntimeException("Profile image is required");
     }
 
     String imageName = StringUtils.cleanPath(profileImage.getOriginalFilename());
+    Path targetPath = Paths.get(uploadDir).resolve(imageName);
 
-    String uploadDir = "C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/Profile-img/";
+    
     Path uploadPath = Paths.get(uploadDir);
 
     if (!Files.exists(uploadPath)) {
@@ -150,27 +181,37 @@ public ResponseEntity<AppUserDto> insert(
 
 
     Path filePath = uploadPath.resolve(imageName);
-    Files.copy(profileImage.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+    try {
+        // Ensure directory exists
+        Files.createDirectories(targetPath.getParent());
+        // Copy (overwrite if exists)
+        Files.copy(profileImage.getInputStream(), targetPath, StandardCopyOption.REPLACE_EXISTING);
+        user.setProfileImage(imageName);
 
-
+    } catch (IOException ex) {
+        log.error("Failed to store profile image [{}] in [{}]: {}", 
+                  imageName, uploadDir, ex.getMessage(), ex);
+        throw new RuntimeException("Could not save profile image", ex);
+    }
     user.setProfileImage(imageName);
 
     AppUsers entity = appUserService.insert(user);
     AppUserDto responseDto = appUserMapper.map(entity);
 
+    System.out.print("response :"+ responseDto);
     return ResponseEntity.ok(responseDto);
 }
 
 
-@PutMapping(consumes = { "multipart/form-data" })
+@PutMapping(consumes = "multipart/form-data")
 public ResponseEntity<AppUserDto> update(
-        @RequestParam("id") Long id,
-        @RequestParam("userName") String userName,
-        @RequestParam("email") String email,
-        @RequestParam("telephone") String telephone,
-        @RequestParam("motDePasse") String motDePasse,
-        @RequestParam("roleName") String roleName,
-        @RequestParam("description") String description,
+        @RequestParam Long id,
+        @RequestParam String userName,
+        @RequestParam String email,
+        @RequestParam String telephone,
+        @RequestParam String motDePasse,
+        @RequestParam String roleName,
+        @RequestParam String description,
         @RequestParam(value = "profileImage", required = false) MultipartFile profileImage) throws IOException {
 
     AppUsers currentUser = appUserService.findById(id);
@@ -180,80 +221,74 @@ public ResponseEntity<AppUserDto> update(
 
     String oldImageName = currentUser.getProfileImage();
 
+    // Update basic fields
     currentUser.setUserName(userName);
     currentUser.setEmail(email);
     currentUser.setTelephone(telephone);
     currentUser.setDescription(description);
+    currentUser.setMotDePasse(passwordEncoder.encode(motDePasse));
 
-    String hashedPassword = passwordEncoder.encode(motDePasse);
-    currentUser.setMotDePasse(hashedPassword);
-
+    // Lookup role
     Roles role = rolesRepo.findByRoleName(roleName)
-            .orElseThrow(() -> new ResourceNotFoundException("Role not found with name: " + roleName));
+            .orElseThrow(() -> new ResourceNotFoundException("Role not found: " + roleName));
     currentUser.setRole(role);
 
+    // Handle new profile image if provided
     if (profileImage != null && !profileImage.isEmpty()) {
         String imageName = StringUtils.cleanPath(profileImage.getOriginalFilename());
-        String uploadDir = "C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/Profile-img";
-        Path uploadPath = Paths.get(uploadDir);
+        Path target = Paths.get(uploadDir).resolve(imageName).normalize();
 
-        if (!Files.exists(uploadPath)) {
-            Files.createDirectories(uploadPath);
-        }
+        // Ensure upload directory exists
+        Files.createDirectories(target.getParent());
 
-        Path filePath = uploadPath.resolve(imageName);
-        Files.copy(profileImage.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
-
+        // Save new image
+        Files.copy(profileImage.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
         currentUser.setProfileImage(imageName);
 
+        // Delete old image if it differs
         if (oldImageName != null && !oldImageName.equals(imageName)) {
-            Path oldImagePath = uploadPath.resolve(oldImageName);
+            Path oldPath = Paths.get(uploadDir).resolve(oldImageName).normalize();
             try {
-                Files.deleteIfExists(oldImagePath);
-                System.out.println("Old image deleted: " + oldImagePath);
-            } catch (IOException e) {
-                System.out.println("Failed to delete old image: " + e.getMessage());
+                Files.deleteIfExists(oldPath);
+                log.debug("Deleted old image: {}", oldPath);
+            } catch (IOException ex) {
+                log.warn("Could not delete old image {}: {}", oldPath, ex.getMessage());
             }
         }
     }
 
-    AppUsers updatedUser = appUserService.update(currentUser);
-    AppUserDto responseDto = appUserMapper.map(updatedUser);
-
-    return ResponseEntity.ok(responseDto);
+    // Persist changes
+    AppUsers updated = appUserService.update(currentUser);
+    AppUserDto dto = appUserMapper.map(updated);
+    return ResponseEntity.ok(dto);
 }
 
-
 @DeleteMapping("/{id}")
-public ResponseEntity<String> deleteById(@PathVariable Long id) {
-
+public ResponseEntity<Map<String,String>> deleteById(@PathVariable Long id) {
     AppUsers user = appUserService.findById(id);
     if (user == null) {
         throw new ResourceNotFoundException("User not found with ID: " + id);
     }
 
-    String uploadDir = "C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/Profile-img";
+    // Delete profile image file if present
     String imageName = user.getProfileImage();
-
-    if (imageName != null && !imageName.isEmpty()) {
-        Path imagePath = Paths.get(uploadDir, imageName);
+    if (imageName != null && !imageName.isBlank()) {
+        Path file = Paths.get(uploadDir).resolve(imageName).normalize();
         try {
-            boolean deleted = Files.deleteIfExists(imagePath);
-            if (deleted) {
-                System.out.println("Image deleted: " + imagePath);
-            } else {
-                System.out.println("Image not found: " + imagePath);
-            }
-        } catch (IOException e) {
-            System.out.println("Failed to delete image: " + e.getMessage());
+            boolean deleted = Files.deleteIfExists(file);
+            log.debug("Image {} deleted: {}", file, deleted);
+        } catch (IOException ex) {
+            log.warn("Failed to delete image {}: {}", file, ex.getMessage());
         }
     }
 
+    // Delete DB record
     appUserService.deleteById(id);
 
-    String jsonResponse = "{\"message\": \"User and associated image deleted successfully.\"}";
-    return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(jsonResponse);
+    // Return JSON message
+    return ResponseEntity.ok(Map.of("message", "User and associated image deleted successfully."));
 }
+
 
 
     @PatchMapping("/password")

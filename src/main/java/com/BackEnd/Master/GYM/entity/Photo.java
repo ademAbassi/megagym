@@ -23,6 +23,7 @@ public class Photo {
     private String description;
     private LocalDate uploadDate;
 
+    
     @ManyToOne
     @JoinColumn(name = "album_id")
     private Album album;

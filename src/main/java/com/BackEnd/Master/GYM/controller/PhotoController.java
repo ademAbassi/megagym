@@ -7,7 +7,9 @@ import com.BackEnd.Master.GYM.repository.AlbumRepo;
 import com.BackEnd.Master.GYM.Mapper.PhotoMapper;
 import com.BackEnd.Master.GYM.services.PhotoService;
 import lombok.RequiredArgsConstructor;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -17,13 +19,18 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import com.BackEnd.Master.GYM.Exceptions.ResourceNotFoundException;
 
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+
 import java.io.File;
 import java.io.IOException;
+import java.net.MalformedURLException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.nio.file.Path;
 
 @RequiredArgsConstructor
@@ -35,7 +42,10 @@ public class PhotoController {
     private final PhotoService photoService;
     private final PhotoMapper photoMapper;
     private final AlbumRepo albumRepo;
+    private static final Logger log = LoggerFactory.getLogger(PhotoController.class);
 
+    @Value("${app.upload.dir}")
+    private String uploadDir;
     @GetMapping("/{id}")
     public ResponseEntity<PhotoDto> findById(@PathVariable Long id) {
         Photo entity = photoService.findById(id);
@@ -57,128 +67,121 @@ public class PhotoController {
         return ResponseEntity.ok(dtos);
     }
 
-    @GetMapping("/images/{imageName}")
-    public ResponseEntity<?> getImage(@PathVariable String imageName) {
-        String imagePath = "C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/Gallery/" + imageName;
-        
-        File imgFile = new File(imagePath);
-
-        if (!imgFile.exists()) {
-            return ResponseEntity.notFound().build();
-        }
-
+    // 1) Serve gallery images
+    @GetMapping("/images/{imageName:.+}")
+    public ResponseEntity<Resource> getImage(@PathVariable String imageName) {
         try {
+            Path file = Paths.get(uploadDir).resolve(imageName).normalize();
+            Resource resource = new UrlResource(file.toUri());
+            if (!resource.exists() || !resource.isReadable()) {
+                return ResponseEntity.notFound().build();
+            }
+            String contentType = Files.probeContentType(file);
+            if (contentType == null) contentType = "application/octet-stream";
+
             return ResponseEntity.ok()
-                    .contentType(MediaType.IMAGE_JPEG)
-                    .body(new FileSystemResource(imgFile));
-        } catch (Exception e) {
+                                 .contentType(MediaType.parseMediaType(contentType))
+                                 .body(resource);
+        } catch (MalformedURLException e) {
+            log.error("Invalid URL for image {}: {}", imageName, e.getMessage());
+            return ResponseEntity.badRequest().build();
+        } catch (IOException e) {
+            log.error("Could not determine file type for {}: {}", imageName, e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
-    @PostMapping(consumes = { "multipart/form-data" })
-public ResponseEntity<PhotoDto> insert(
-        @RequestParam("name") String name,
-        @RequestParam("description") String description,
-        @RequestParam("albumId") Long albumId,
-        @RequestParam("photoImage") MultipartFile photoImage) throws IOException {
+    // 2) Create photo
+    @PostMapping(consumes = "multipart/form-data")
+    public ResponseEntity<PhotoDto> insert(
+            @RequestParam String name,
+            @RequestParam String description,
+            @RequestParam Long albumId,
+            @RequestParam("photoImage") MultipartFile photoImage) throws IOException {
 
-    if (photoImage.isEmpty()) {
-        throw new RuntimeException("Photo image is required");
+        if (photoImage.isEmpty())
+            throw new RuntimeException("Photo image is required");
+
+        Album album = albumRepo.findById(albumId)
+                        .orElseThrow(() -> new ResourceNotFoundException("Album not found: " + albumId));
+
+        Photo photo = new Photo();
+        photo.setName(name);
+        photo.setDescription(description);
+        photo.setUploadDate(LocalDate.now());
+        photo.setAlbum(album);
+
+        // save file
+        String imageName = StringUtils.cleanPath(photoImage.getOriginalFilename());
+        Path target = Paths.get(uploadDir).resolve(imageName).normalize();
+        Files.createDirectories(target.getParent());
+        Files.copy(photoImage.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
+        photo.setImageName(imageName);
+
+        Photo saved = photoService.insert(photo);
+        return ResponseEntity.ok(photoMapper.map(saved));
     }
 
-    Album album = albumRepo.findById(albumId)
-            .orElseThrow(() -> new ResourceNotFoundException("Album not found with ID: " + albumId));
+    // 3) Update photo
+    @PutMapping(consumes = "multipart/form-data")
+    public ResponseEntity<PhotoDto> update(
+            @RequestParam Long id,
+            @RequestParam String name,
+            @RequestParam String description,
+            @RequestParam Long albumId,
+            @RequestParam(value = "photoImage", required = false) MultipartFile photoImage) throws IOException {
 
-    Photo photo = new Photo();
-    photo.setName(name);
-    photo.setDescription(description);
-    photo.setUploadDate(LocalDate.now());
-    photo.setAlbum(album);
+        Photo current = photoService.findById(id);
+        if (current == null)
+            throw new ResourceNotFoundException("Photo not found: " + id);
 
-    String imageName = StringUtils.cleanPath(photoImage.getOriginalFilename());
-    Path uploadPath = Paths.get("C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/Gallery/");
-    Files.createDirectories(uploadPath);
+        Album album = albumRepo.findById(albumId)
+                        .orElseThrow(() -> new ResourceNotFoundException("Album not found: " + albumId));
 
-    Path imagePath = uploadPath.resolve(imageName);
-    Files.copy(photoImage.getInputStream(), imagePath, StandardCopyOption.REPLACE_EXISTING);
+        String oldImage = current.getImageName();
+        current.setName(name);
+        current.setDescription(description);
+        current.setAlbum(album);
 
-    photo.setImageName(imageName);
+        if (photoImage != null && !photoImage.isEmpty()) {
+            String newName = StringUtils.cleanPath(photoImage.getOriginalFilename());
+            Path target = Paths.get(uploadDir).resolve(newName).normalize();
+            Files.createDirectories(target.getParent());
+            Files.copy(photoImage.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
+            current.setImageName(newName);
 
-    Photo savedPhoto = photoService.insert(photo);
-    PhotoDto responseDto = photoMapper.map(savedPhoto);
-
-    return ResponseEntity.ok(responseDto);
-}
-
-
-
-@PutMapping(consumes = { "multipart/form-data" })
-public ResponseEntity<PhotoDto> update(
-        @RequestParam("id") Long id,
-        @RequestParam("name") String name,
-        @RequestParam("description") String description,
-        @RequestParam("albumId") Long albumId,
-        @RequestParam(value = "photoImage", required = false) MultipartFile photoImage) throws IOException {
-
-    Photo currentPhoto = photoService.findById(id);
-    if (currentPhoto == null) {
-        throw new ResourceNotFoundException("Photo not found with ID: " + id);
-    }
-
-    Album album = albumRepo.findById(albumId)
-            .orElseThrow(() -> new ResourceNotFoundException("Album not found with ID: " + albumId));
-
-    String oldImageName = currentPhoto.getImageName();
-
-    currentPhoto.setName(name);
-    currentPhoto.setDescription(description);
-    currentPhoto.setAlbum(album);
-
-    if (photoImage != null && !photoImage.isEmpty()) {
-        String newImageName = StringUtils.cleanPath(photoImage.getOriginalFilename());
-        Path uploadPath = Paths.get("C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/Gallery/");
-        Files.createDirectories(uploadPath);
-
-        Path newImagePath = uploadPath.resolve(newImageName);
-        Files.copy(photoImage.getInputStream(), newImagePath, StandardCopyOption.REPLACE_EXISTING);
-
-        currentPhoto.setImageName(newImageName);
-
-        if (oldImageName != null && !oldImageName.equals(newImageName)) {
-            Path oldImagePath = uploadPath.resolve(oldImageName);
-            Files.deleteIfExists(oldImagePath);
+            // delete old file
+            if (oldImage != null && !oldImage.equals(newName)) {
+                Path oldPath = Paths.get(uploadDir).resolve(oldImage).normalize();
+                Files.deleteIfExists(oldPath);
+            }
         }
+
+        Photo updated = photoService.update(current);
+        return ResponseEntity.ok(photoMapper.map(updated));
     }
 
-    Photo updatedPhoto = photoService.update(currentPhoto);
-    PhotoDto responseDto = photoMapper.map(updatedPhoto);
+    // 4) Delete photo
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Map<String,String>> deleteById(@PathVariable Long id) {
+        Photo photo = photoService.findById(id);
+        if (photo == null)
+            throw new ResourceNotFoundException("Photo not found: " + id);
 
-    return ResponseEntity.ok(responseDto);
-}
-
-
-@DeleteMapping("/{id}")
-public ResponseEntity<String> deleteById(@PathVariable Long id) {
-    Photo photo = photoService.findById(id);
-    if (photo == null) {
-        throw new ResourceNotFoundException("Photo not found with ID: " + id);
-    }
-
-    if (photo.getImageName() != null && !photo.getImageName().isEmpty()) {
-        Path imagePath = Paths.get("C:/Users/USER/Desktop/projet PFE/FrontEnd-MasterGYM-main/FrontEnd-MasterGYM-main/src/assets/Gallery/").resolve(photo.getImageName());
-        try {
-            Files.deleteIfExists(imagePath);
-        } catch (IOException e) {
-            System.err.println("Failed to delete image: " + e.getMessage());
+        String imageName = photo.getImageName();
+        if (imageName != null && !imageName.isBlank()) {
+            Path file = Paths.get(uploadDir).resolve(imageName).normalize();
+            try {
+                Files.deleteIfExists(file);
+                log.debug("Deleted image file: {}", file);
+            } catch (IOException e) {
+                log.warn("Failed to delete image {}: {}", file, e.getMessage());
+            }
         }
+
+        photoService.deleteById(id);
+        return ResponseEntity.ok(Map.of("message", "Photo and associated image deleted successfully."));
     }
-
-    photoService.deleteById(id);
-
-    String jsonResponse = "{\"message\": \"Photo and associated image deleted successfully.\"}";
-    return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(jsonResponse);
-}
 
 
 }
